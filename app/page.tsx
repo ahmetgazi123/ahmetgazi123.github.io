@@ -178,6 +178,7 @@ export default function Home() {
   const [printOrders, setPrintOrders] = useState<PrintOrder[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [passwordRecoveryPending, setPasswordRecoveryPending] = useState(false);
   const [cloudLoaded, setCloudLoaded] = useState(false);
   const [syncStatus, setSyncStatus] = useState<"loading" | "synced" | "saving" | "error">("loading");
   const [syncRetryToken, setSyncRetryToken] = useState(0);
@@ -200,10 +201,14 @@ export default function Home() {
       return;
     }
     let mounted = true;
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
       setUser(session?.user ?? null);
       setAuthError("");
+      if (event === "PASSWORD_RECOVERY") {
+        setPasswordRecoveryPending(true);
+      }
       if (!session) {
+        setPasswordRecoveryPending(false);
         setCloudLoaded(false);
         lastCloudDataRef.current = "";
       }
@@ -507,6 +512,10 @@ export default function Home() {
 
   if (!user) {
     return <AuthScreen initialError={authError} />;
+  }
+
+  if (passwordRecoveryPending) {
+    return <PasswordRecoveryScreen onComplete={() => setPasswordRecoveryPending(false)} />;
   }
 
   if (!cloudLoaded) {
@@ -858,7 +867,7 @@ function LoadingScreen({ message, error = false, onRetry }: { message: string; e
 }
 
 function AuthScreen({ initialError }: { initialError: string }) {
-  const [mode, setMode] = useState<"sign-in" | "sign-up">("sign-in");
+  const [mode, setMode] = useState<"sign-in" | "sign-up" | "reset-password">("sign-in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState(initialError);
@@ -870,7 +879,13 @@ function AuthScreen({ initialError }: { initialError: string }) {
     setBusy(true);
     setMessage("");
     try {
-      if (mode === "sign-up") {
+      if (mode === "reset-password") {
+        const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+          redirectTo: window.location.origin,
+        });
+        if (error) throw error;
+        setMessage("Şifre yenileme bağlantısı e-posta adresinize gönderildi. Gelen kutunuzu ve spam klasörünü kontrol edin.");
+      } else if (mode === "sign-up") {
         const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
         if (error) throw error;
         if (!data.session) {
@@ -882,7 +897,14 @@ function AuthScreen({ initialError }: { initialError: string }) {
       }
     } catch (error) {
       console.error("Supabase kimlik doğrulaması başarısız.", error);
-      setMessage(error instanceof Error ? error.message : "Giriş sırasında bir hata oluştu.");
+      const errorMessage = error instanceof Error ? error.message : "";
+      if (mode === "sign-in" && /invalid login credentials/i.test(errorMessage)) {
+        setMessage("E-posta veya şifre eşleşmiyor. E-posta doğrulama iletisini kontrol edin veya “Şifremi unuttum” seçeneğini kullanın.");
+      } else if (/email not confirmed/i.test(errorMessage)) {
+        setMessage("E-posta adresiniz henüz doğrulanmamış. Supabase'den gelen doğrulama e-postasındaki bağlantıya tıklayın.");
+      } else {
+        setMessage(errorMessage || "Giriş sırasında bir hata oluştu.");
+      }
     } finally {
       setBusy(false);
     }
@@ -893,28 +915,87 @@ function AuthScreen({ initialError }: { initialError: string }) {
       <section className="w-full max-w-[420px] rounded-2xl border border-line bg-white p-6 shadow-card sm:p-8">
         <Brand />
         <div className="mt-8">
-          <h1 className="text-2xl font-bold tracking-tight text-ink">{mode === "sign-in" ? "Hesabınıza giriş yapın" : "İlk hesabınızı oluşturun"}</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-ink">{mode === "sign-in" ? "Hesabınıza giriş yapın" : mode === "sign-up" ? "İlk hesabınızı oluşturun" : "Şifrenizi yenileyin"}</h1>
           <p className="mt-2 text-sm leading-6 text-slate-500">Aynı hesapla giriş yaptığınız cihazlarda kayıtlarınız eşzamanlı görünür.</p>
         </div>
         <form onSubmit={submit} className="mt-6 space-y-4">
           <Field label="E-posta" required>
             <input autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="ornek@firma.com" className={inputClass} />
           </Field>
-          <Field label="Şifre" required>
-            <input autoComplete={mode === "sign-in" ? "current-password" : "new-password"} required minLength={6} type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="En az 6 karakter" className={inputClass} />
-          </Field>
+          {mode !== "reset-password" && (
+            <Field label="Şifre" required>
+              <input autoComplete={mode === "sign-in" ? "current-password" : "new-password"} required minLength={6} type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="En az 6 karakter" className={inputClass} />
+            </Field>
+          )}
           {message && <p role="alert" className="rounded-xl bg-amber-50 px-3.5 py-3 text-xs leading-5 text-amber-800">{message}</p>}
           <button disabled={busy} type="submit" className="h-11 w-full rounded-xl bg-brand-600 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60">
-            {busy ? "Lütfen bekleyin..." : mode === "sign-in" ? "Giriş yap" : "Hesap oluştur"}
+            {busy ? "Lütfen bekleyin..." : mode === "sign-in" ? "Giriş yap" : mode === "sign-up" ? "Hesap oluştur" : "Sıfırlama bağlantısı gönder"}
           </button>
         </form>
+        {mode === "sign-in" && (
+          <button onClick={() => { setMode("reset-password"); setMessage(""); }} className="mt-4 block w-full text-center text-sm font-semibold text-brand-700 hover:text-brand-800">
+            Şifremi unuttum
+          </button>
+        )}
         <p className="mt-5 text-center text-sm text-slate-500">
-          {mode === "sign-in" ? "İlk kez mi kullanıyorsunuz?" : "Zaten hesabınız var mı?"}{" "}
+          {mode === "sign-in" ? "İlk kez mi kullanıyorsunuz?" : mode === "sign-up" ? "Zaten hesabınız var mı?" : "Şifrenizi hatırladınız mı?"}{" "}
           <button onClick={() => { setMode(mode === "sign-in" ? "sign-up" : "sign-in"); setMessage(""); }} className="font-semibold text-brand-700 hover:text-brand-800">
             {mode === "sign-in" ? "Hesap oluştur" : "Giriş yap"}
           </button>
         </p>
         <div className="mt-6 flex items-center justify-center gap-1.5 text-[11px] text-slate-400"><CheckCircle2 size={13} className="text-emerald-500" /> Kayıtlarınız Supabase ile güvenli biçimde eşzamanlanır</div>
+      </section>
+    </main>
+  );
+}
+
+function PasswordRecoveryScreen({ onComplete }: { onComplete: () => void }) {
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    if (password !== confirmPassword) {
+      setMessage("Girdiğiniz şifreler eşleşmiyor.");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      const { error } = await supabase.auth.updateUser({ password });
+      if (error) throw error;
+      onComplete();
+    } catch (error) {
+      console.error("Şifre güncellenemedi.", error);
+      setMessage(error instanceof Error ? error.message : "Şifre güncellenemedi. Sıfırlama bağlantısını yeniden isteyin.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-canvas p-4">
+      <section className="w-full max-w-[420px] rounded-2xl border border-line bg-white p-6 shadow-card sm:p-8">
+        <Brand />
+        <div className="mt-8">
+          <h1 className="text-2xl font-bold tracking-tight text-ink">Yeni şifrenizi belirleyin</h1>
+          <p className="mt-2 text-sm leading-6 text-slate-500">Hesabınız için en az 6 karakterli yeni bir şifre oluşturun.</p>
+        </div>
+        <form onSubmit={submit} className="mt-6 space-y-4">
+          <Field label="Yeni şifre" required>
+            <input autoFocus autoComplete="new-password" required minLength={6} type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="En az 6 karakter" className={inputClass} />
+          </Field>
+          <Field label="Yeni şifre (tekrar)" required>
+            <input autoComplete="new-password" required minLength={6} type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Şifrenizi tekrar girin" className={inputClass} />
+          </Field>
+          {message && <p role="alert" className="rounded-xl bg-rose-50 px-3.5 py-3 text-xs leading-5 text-rose-700">{message}</p>}
+          <button disabled={busy} type="submit" className="h-11 w-full rounded-xl bg-brand-600 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60">
+            {busy ? "Kaydediliyor..." : "Yeni şifreyi kaydet"}
+          </button>
+        </form>
       </section>
     </main>
   );
