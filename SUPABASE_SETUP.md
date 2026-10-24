@@ -1,6 +1,7 @@
 # Supabase kurulumu
 
 Uygulama, aynı Supabase hesabıyla oturum açan cihazlar arasında fasoncu, iş, teslimat notu ve Fatih Baskı kayıtlarını senkronize eder. Giriş yapılmadan veriler buluta aktarılmaz.
+Giriş ekranındaki **Beni hatırla** seçeneği oturumu cihazda kalıcı tutar; seçim kaldırılırsa oturum yalnızca mevcut tarayıcı oturumu boyunca saklanır.
 
 ## 1. Supabase projesi oluşturun
 

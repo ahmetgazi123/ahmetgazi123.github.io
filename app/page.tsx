@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { isSupabaseConfigured, supabase } from "@/lib/supabase";
+import { isSupabaseConfigured, setRememberSession, supabase } from "@/lib/supabase";
 
 type LogEntry = {
   id: string;
@@ -870,8 +870,13 @@ function AuthScreen({ initialError }: { initialError: string }) {
   const [mode, setMode] = useState<"sign-in" | "sign-up" | "reset-password">("sign-in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [rememberSession, setRememberSessionState] = useState(true);
   const [message, setMessage] = useState(initialError);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setRememberSessionState(window.localStorage.getItem("fason-takip-remember-session") !== "false");
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -886,12 +891,14 @@ function AuthScreen({ initialError }: { initialError: string }) {
         if (error) throw error;
         setMessage("Şifre yenileme bağlantısı e-posta adresinize gönderildi. Gelen kutunuzu ve spam klasörünü kontrol edin.");
       } else if (mode === "sign-up") {
+        setRememberSession(rememberSession);
         const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
         if (error) throw error;
         if (!data.session) {
           setMessage("Hesap oluşturuldu. E-postanıza gelen doğrulama bağlantısını açıp ardından giriş yapın.");
         }
       } else {
+        setRememberSession(rememberSession);
         const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
         if (error) throw error;
       }
@@ -926,6 +933,21 @@ function AuthScreen({ initialError }: { initialError: string }) {
             <Field label="Şifre" required>
               <input autoComplete={mode === "sign-in" ? "current-password" : "new-password"} required minLength={6} type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="En az 6 karakter" className={inputClass} />
             </Field>
+          )}
+          {mode !== "reset-password" && (
+            <label className="flex cursor-pointer items-center gap-2.5 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={rememberSession}
+                onChange={(event) => {
+                  const remember = event.target.checked;
+                  setRememberSessionState(remember);
+                  setRememberSession(remember);
+                }}
+                className="h-4 w-4 rounded border-slate-300 accent-brand-600"
+              />
+              <span>Beni hatırla <span className="text-xs text-slate-400">(bu cihazda açık kalsın)</span></span>
+            </label>
           )}
           {message && <p role="alert" className="rounded-xl bg-amber-50 px-3.5 py-3 text-xs leading-5 text-amber-800">{message}</p>}
           <button disabled={busy} type="submit" className="h-11 w-full rounded-xl bg-brand-600 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60">
