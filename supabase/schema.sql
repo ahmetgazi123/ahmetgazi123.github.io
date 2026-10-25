@@ -38,3 +38,29 @@ begin
   end if;
 end
 $$;
+
+-- Veri Modeli Notu (JSONB):
+-- public.user_data.data sütunu aşağıdaki yapıyı barındırır:
+-- {
+--   "makers": [
+--     {
+--       "id": "...",
+--       "name": "...",
+--       "phone": "...",
+--       "color": "...",
+--       "works": [
+--         {
+--           "id": "...",
+--           "product": "...",
+--           "quantity": 500,
+--           "date": "YYYY-MM-DD",
+--           "completedAt": "YYYY-MM-DD",
+--           "logs": [{ "id": "...", "note": "...", "date": "YYYY-MM-DD" }],
+--           "tasks": [{ "id": "...", "text": "...", "completed": false }]
+--         }
+--       ]
+--     }
+--   ],
+--   "printOrders": [...]
+-- }
+

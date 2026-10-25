@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   Bell,
@@ -15,14 +16,17 @@ import {
   FileText,
   History,
   Layers3,
+  ListTodo,
   MoreHorizontal,
   PackageCheck,
+  Pencil,
   Plus,
   Printer,
   Scissors,
   Search,
   Shirt,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
@@ -35,6 +39,12 @@ type LogEntry = {
   date: string;
 };
 
+type WorkTask = {
+  id: string;
+  text: string;
+  completed: boolean;
+};
+
 type WorkOrder = {
   id: string;
   product: string;
@@ -42,6 +52,7 @@ type WorkOrder = {
   date: string;
   completedAt?: string;
   logs: LogEntry[];
+  tasks?: WorkTask[];
 };
 
 type Maker = {
@@ -64,7 +75,7 @@ type AppData = {
   printOrders: PrintOrder[];
 };
 
-type Modal = "maker" | "work" | "log" | "print" | null;
+type Modal = "maker" | "work" | "edit-work" | "delete-work" | "log" | "print" | null;
 
 const STORAGE_KEY = "fason-takip-data-v1";
 const PRINT_STORAGE_KEY = "fatih-baski-data-v1";
@@ -84,6 +95,16 @@ function todayString() {
   const date = new Date();
   const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return localDate.toISOString().slice(0, 10);
+}
+
+function isWorkTask(value: unknown): value is WorkTask {
+  if (!value || typeof value !== "object") return false;
+  const task = value as Partial<WorkTask>;
+  return (
+    typeof task.id === "string" &&
+    typeof task.text === "string" &&
+    typeof task.completed === "boolean"
+  );
 }
 
 function isMaker(value: unknown): value is Maker {
@@ -111,7 +132,8 @@ function isMaker(value: unknown): value is Maker {
             typeof log.id === "string" &&
             typeof log.note === "string" &&
             typeof log.date === "string",
-        ),
+        ) &&
+        (work.tasks === undefined || (Array.isArray(work.tasks) && work.tasks.every(isWorkTask))),
     )
   );
 }
@@ -455,6 +477,7 @@ export default function Home() {
       quantity,
       date,
       logs: [],
+      tasks: [],
     };
     setMakers((current) =>
       current.map((maker) =>
@@ -463,6 +486,70 @@ export default function Home() {
     );
     setModal(null);
     setToast("Yeni iş aktif işlere eklendi.");
+  }
+
+  function updateWork(workId: string, product: string, quantity: number, date: string, targetMakerId: string) {
+    if (!selectedMaker) return;
+    const existingWork = selectedMaker.works.find((work) => work.id === workId);
+    if (!existingWork) return;
+
+    const updatedWork: WorkOrder = {
+      ...existingWork,
+      product: product.trim(),
+      quantity,
+      date,
+    };
+
+    if (targetMakerId === selectedMaker.id) {
+      setMakers((current) =>
+        current.map((maker) =>
+          maker.id === selectedMaker.id
+            ? {
+                ...maker,
+                works: maker.works.map((work) => (work.id === workId ? updatedWork : work)),
+              }
+            : maker,
+        ),
+      );
+      setToast("Aktif iş bilgileri güncellendi.");
+    } else {
+      const targetMaker = makers.find((maker) => maker.id === targetMakerId);
+      setMakers((current) =>
+        current.map((maker) => {
+          if (maker.id === selectedMaker.id) {
+            return { ...maker, works: maker.works.filter((work) => work.id !== workId) };
+          }
+          if (maker.id === targetMakerId) {
+            return { ...maker, works: [updatedWork, ...maker.works] };
+          }
+          return maker;
+        }),
+      );
+      setToast(
+        targetMaker
+          ? `İş güncellendi ve ${targetMaker.name} atölyesine taşındı.`
+          : "İş bilgileri güncellendi.",
+      );
+    }
+
+    setModal(null);
+    setTargetWorkId(null);
+  }
+
+  function deleteWork(workId: string) {
+    if (!selectedMaker) return;
+    const existingWork = selectedMaker.works.find((work) => work.id === workId);
+    const isHistoryWork = Boolean(existingWork?.completedAt);
+    setMakers((current) =>
+      current.map((maker) =>
+        maker.id === selectedMaker.id
+          ? { ...maker, works: maker.works.filter((work) => work.id !== workId) }
+          : maker,
+      ),
+    );
+    setModal(null);
+    setTargetWorkId(null);
+    setToast(isHistoryWork ? "Geçmiş iş kaydı kalıcı olarak silindi." : "Aktif iş silindi.");
   }
 
   function addLog(note: string, date: string) {
@@ -483,6 +570,123 @@ export default function Home() {
     setModal(null);
     setTargetWorkId(null);
     setToast("Teslimat notu zaman çizelgesine eklendi.");
+  }
+
+  function updateLog(workId: string, logId: string, note: string, date: string) {
+    if (!selectedMaker) return;
+    setMakers((current) =>
+      current.map((maker) =>
+        maker.id === selectedMaker.id
+          ? {
+              ...maker,
+              works: maker.works.map((work) =>
+                work.id === workId
+                  ? {
+                      ...work,
+                      logs: work.logs.map((log) =>
+                        log.id === logId ? { ...log, note: note.trim(), date } : log,
+                      ),
+                    }
+                  : work,
+              ),
+            }
+          : maker,
+      ),
+    );
+    setToast("Teslimat notu güncellendi.");
+  }
+
+  function addTask(workId: string, text: string) {
+    if (!selectedMaker || !text.trim()) return;
+    const newTask: WorkTask = {
+      id: makeId(),
+      text: text.trim(),
+      completed: false,
+    };
+    setMakers((current) =>
+      current.map((maker) =>
+        maker.id === selectedMaker.id
+          ? {
+              ...maker,
+              works: maker.works.map((work) =>
+                work.id === workId
+                  ? { ...work, tasks: [...(work.tasks ?? []), newTask] }
+                  : work,
+              ),
+            }
+          : maker,
+      ),
+    );
+    setToast("Görev / eksik malzeme eklendi.");
+  }
+
+  function toggleTask(workId: string, taskId: string) {
+    if (!selectedMaker) return;
+    setMakers((current) =>
+      current.map((maker) =>
+        maker.id === selectedMaker.id
+          ? {
+              ...maker,
+              works: maker.works.map((work) =>
+                work.id === workId
+                  ? {
+                      ...work,
+                      tasks: (work.tasks ?? []).map((task) =>
+                        task.id === taskId ? { ...task, completed: !task.completed } : task,
+                      ),
+                    }
+                  : work,
+              ),
+            }
+          : maker,
+      ),
+    );
+  }
+
+  function updateTask(workId: string, taskId: string, text: string) {
+    if (!selectedMaker || !text.trim()) return;
+    setMakers((current) =>
+      current.map((maker) =>
+        maker.id === selectedMaker.id
+          ? {
+              ...maker,
+              works: maker.works.map((work) =>
+                work.id === workId
+                  ? {
+                      ...work,
+                      tasks: (work.tasks ?? []).map((task) =>
+                        task.id === taskId ? { ...task, text: text.trim() } : task,
+                      ),
+                    }
+                  : work,
+              ),
+            }
+          : maker,
+      ),
+    );
+    setToast("Görev güncellendi.");
+  }
+
+  function deleteTask(workId: string, taskId: string) {
+    if (!selectedMaker) return;
+    setMakers((current) =>
+      current.map((maker) =>
+        maker.id === selectedMaker.id
+          ? {
+              ...maker,
+              works: maker.works.map((work) =>
+                work.id === workId
+                  ? {
+                      ...work,
+                      tasks: (work.tasks ?? []).filter((task) => task.id !== taskId),
+                    }
+                  : work,
+              ),
+            }
+          : maker,
+      ),
+    );
+    setToast("Görev listeden kaldırıldı.");
   }
 
   function completeWork(workId: string) {
@@ -531,6 +735,7 @@ export default function Home() {
   const visibleWorks = selectedMaker
     ? selectedMaker.works.filter((work) => (activeTab === "active" ? !work.completedAt : Boolean(work.completedAt)))
     : [];
+  const targetWork = selectedMaker?.works.find((work) => work.id === targetWorkId) ?? null;
 
   return (
     <main className="min-h-screen bg-canvas pb-24 md:pb-8">
@@ -678,6 +883,19 @@ export default function Home() {
                             setTargetWorkId(work.id);
                             setModal("log");
                           }}
+                          onEditWork={() => {
+                            setTargetWorkId(work.id);
+                            setModal("edit-work");
+                          }}
+                          onDeleteWork={() => {
+                            setTargetWorkId(work.id);
+                            setModal("delete-work");
+                          }}
+                          onUpdateLog={(logId, note, date) => updateLog(work.id, logId, note, date)}
+                          onAddTask={(text) => addTask(work.id, text)}
+                          onToggleTask={(taskId) => toggleTask(work.id, taskId)}
+                          onUpdateTask={(taskId, text) => updateTask(work.id, taskId, text)}
+                          onDeleteTask={(taskId) => deleteTask(work.id, taskId)}
                           onComplete={() => completeWork(work.id)}
                         />
                       ))}
@@ -727,31 +945,43 @@ export default function Home() {
 
                 {filteredMakers.length ? (
                   <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                    {filteredMakers.map((maker, index) => (
-                      <button
-                        key={maker.id}
-                        onClick={() => {
-                          setSelectedMakerId(maker.id);
-                          setActiveTab("active");
-                        }}
-                        className="group flex min-h-[124px] items-center gap-4 rounded-2xl border border-line/80 bg-white p-4 text-left shadow-card transition hover:-translate-y-0.5 hover:border-brand-100 hover:shadow-md sm:p-5"
-                      >
-                        <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-[15px] bg-gradient-to-br text-sm font-bold ${maker.color}`}>{getInitials(maker.name)}</div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <h3 className="truncate font-bold text-ink">{maker.name}</h3>
-                            {index === 0 && <span className="rounded-md bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-emerald-700">Son eklenen</span>}
+                    {filteredMakers.map((maker, index) => {
+                      const activeWorks = maker.works.filter((work) => !work.completedAt);
+                      const pendingTasksCount = activeWorks.reduce(
+                        (sum, work) => sum + (work.tasks ?? []).filter((task) => !task.completed).length,
+                        0,
+                      );
+                      return (
+                        <button
+                          key={maker.id}
+                          onClick={() => {
+                            setSelectedMakerId(maker.id);
+                            setActiveTab("active");
+                          }}
+                          className="group flex min-h-[124px] items-center gap-4 rounded-2xl border border-line/80 bg-white p-4 text-left shadow-card transition hover:-translate-y-0.5 hover:border-brand-100 hover:shadow-md sm:p-5"
+                        >
+                          <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-[15px] bg-gradient-to-br text-sm font-bold ${maker.color}`}>{getInitials(maker.name)}</div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <h3 className="truncate font-bold text-ink">{maker.name}</h3>
+                              {index === 0 && <span className="rounded-md bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-emerald-700">Son eklenen</span>}
+                            </div>
+                            <p className="mt-1 truncate text-xs text-slate-400">{maker.phone || "Fasoncu detaylarını görüntüle"}</p>
+                            <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs font-medium text-slate-500">
+                              <span className={`h-1.5 w-1.5 rounded-full ${activeWorks.length > 0 ? "bg-emerald-500" : "bg-slate-300"}`} />
+                              <span>{activeWorks.length} aktif iş</span>
+                              {pendingTasksCount > 0 && (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700 ring-1 ring-inset ring-amber-200/80">
+                                  ⚠️ {pendingTasksCount} eksik
+                                </span>
+                              )}
+                              <span className="ml-auto flex items-center gap-1 text-brand-600 opacity-0 transition group-hover:opacity-100">Detay <ArrowRight size={13} /></span>
+                            </div>
                           </div>
-                          <p className="mt-1 truncate text-xs text-slate-400">{maker.phone || "Fasoncu detaylarını görüntüle"}</p>
-                          <div className="mt-3 flex items-center gap-1.5 text-xs font-medium text-slate-500">
-                            <span className={`h-1.5 w-1.5 rounded-full ${maker.works.some((work) => !work.completedAt) ? "bg-emerald-500" : "bg-slate-300"}`} />
-                            {maker.works.filter((work) => !work.completedAt).length} aktif iş
-                            <span className="ml-auto flex items-center gap-1 text-brand-600 opacity-0 transition group-hover:opacity-100">Detay <ArrowRight size={13} /></span>
-                          </div>
-                        </div>
-                        <ChevronRight className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-brand-500 sm:hidden" size={18} />
-                      </button>
-                    ))}
+                          <ChevronRight className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-brand-500 sm:hidden" size={18} />
+                        </button>
+                      );
+                    })}
                   </div>
                 ) : makers.length ? (
                   <div className="rounded-2xl border border-dashed border-slate-200 bg-white px-5 py-12 text-center">
@@ -816,10 +1046,63 @@ export default function Home() {
       </nav>
 
       {modal && (
-        <ModalShell title={modal === "maker" ? "Yeni fasoncu ekle" : modal === "work" ? "Yeni iş oluştur" : modal === "log" ? "Teslimat notu ekle" : "Baskı kaydı ekle"} onClose={() => setModal(null)}>
+        <ModalShell
+          title={
+            modal === "maker"
+              ? "Yeni fasoncu ekle"
+              : modal === "work"
+                ? "Yeni iş oluştur"
+                : modal === "edit-work"
+                  ? "Aktif işi düzenle"
+                  : modal === "delete-work"
+                    ? targetWork?.completedAt
+                      ? "Geçmiş işi sil"
+                      : "Aktif işi sil"
+                    : modal === "log"
+                      ? "Teslimat notu ekle"
+                      : "Baskı kaydı ekle"
+          }
+          onClose={() => {
+            setModal(null);
+            setTargetWorkId(null);
+          }}
+        >
           {modal === "maker" && <MakerForm onSubmit={addMaker} onCancel={() => setModal(null)} />}
           {modal === "work" && <WorkForm onSubmit={addWork} onCancel={() => setModal(null)} />}
-          {modal === "log" && <LogForm onSubmit={addLog} onCancel={() => setModal(null)} />}
+          {modal === "edit-work" && targetWork && selectedMaker && (
+            <EditWorkForm
+              work={targetWork}
+              currentMakerId={selectedMaker.id}
+              makers={makers}
+              onSubmit={(product, quantity, date, targetMakerId) =>
+                updateWork(targetWork.id, product, quantity, date, targetMakerId)
+              }
+              onCancel={() => {
+                setModal(null);
+                setTargetWorkId(null);
+              }}
+            />
+          )}
+          {modal === "delete-work" && targetWork && (
+            <ConfirmDeleteWorkModal
+              work={targetWork}
+              isHistory={Boolean(targetWork.completedAt)}
+              onConfirm={() => deleteWork(targetWork.id)}
+              onCancel={() => {
+                setModal(null);
+                setTargetWorkId(null);
+              }}
+            />
+          )}
+          {modal === "log" && (
+            <LogForm
+              onSubmit={addLog}
+              onCancel={() => {
+                setModal(null);
+                setTargetWorkId(null);
+              }}
+            />
+          )}
           {modal === "print" && <PrintOrderForm onSubmit={addPrintOrder} onCancel={() => setModal(null)} />}
         </ModalShell>
       )}
@@ -1070,26 +1353,139 @@ function MiniStat({ icon, label, value, tint }: { icon: React.ReactNode; label: 
   );
 }
 
-function WorkCard({ work, isHistory, onAddLog, onComplete }: { work: WorkOrder; isHistory: boolean; onAddLog: () => void; onComplete: () => void }) {
+function WorkCard({
+  work,
+  isHistory,
+  onAddLog,
+  onEditWork,
+  onDeleteWork,
+  onUpdateLog,
+  onAddTask,
+  onToggleTask,
+  onUpdateTask,
+  onDeleteTask,
+  onComplete,
+}: {
+  work: WorkOrder;
+  isHistory: boolean;
+  onAddLog: () => void;
+  onEditWork: () => void;
+  onDeleteWork: () => void;
+  onUpdateLog: (logId: string, note: string, date: string) => void;
+  onAddTask: (text: string) => void;
+  onToggleTask: (taskId: string) => void;
+  onUpdateTask: (taskId: string, text: string) => void;
+  onDeleteTask: (taskId: string) => void;
+  onComplete: () => void;
+}) {
   const sortedLogs = [...work.logs].sort((a, b) => a.date.localeCompare(b.date));
+  const tasks = work.tasks ?? [];
+  const pendingTaskCount = tasks.filter((task) => !task.completed).length;
+
+  const [editingLogId, setEditingLogId] = useState<string | null>(null);
+  const [editingLogNote, setEditingLogNote] = useState("");
+  const [editingLogDate, setEditingLogDate] = useState("");
+
+  const [newTaskText, setNewTaskText] = useState("");
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [editingTaskText, setEditingTaskText] = useState("");
+
+  function startEditingLog(log: LogEntry) {
+    setEditingLogId(log.id);
+    setEditingLogNote(log.note);
+    setEditingLogDate(log.date);
+  }
+
+  function cancelEditingLog() {
+    setEditingLogId(null);
+    setEditingLogNote("");
+    setEditingLogDate("");
+  }
+
+  function saveEditedLog(event: FormEvent<HTMLFormElement>, logId: string) {
+    event.preventDefault();
+    if (!editingLogNote.trim()) return;
+    onUpdateLog(logId, editingLogNote, editingLogDate);
+    cancelEditingLog();
+  }
+
+  function handleAddTaskSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!newTaskText.trim()) return;
+    onAddTask(newTaskText);
+    setNewTaskText("");
+  }
+
+  function startEditingTask(task: WorkTask) {
+    setEditingTaskId(task.id);
+    setEditingTaskText(task.text);
+  }
+
+  function cancelEditingTask() {
+    setEditingTaskId(null);
+    setEditingTaskText("");
+  }
+
+  function saveEditedTask(event: FormEvent<HTMLFormElement>, taskId: string) {
+    event.preventDefault();
+    if (!editingTaskText.trim()) return;
+    onUpdateTask(taskId, editingTaskText);
+    cancelEditingTask();
+  }
+
   return (
     <article className="overflow-hidden rounded-2xl border border-line/80 bg-white shadow-card">
       <div className="p-4 sm:p-5">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex min-w-0 gap-3">
             <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${isHistory ? "bg-emerald-50 text-emerald-600" : "bg-indigo-50 text-brand-600"}`}>
               {isHistory ? <CheckCircle2 size={19} /> : <Shirt size={19} />}
             </div>
-            <div className="min-w-0">
-              <h3 className="truncate font-bold text-ink">{work.product}</h3>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="truncate font-bold text-ink">{work.product}</h3>
+                {!isHistory && pendingTaskCount > 0 && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/80 bg-amber-50 px-2.5 py-0.5 text-[11px] font-bold text-amber-800 shadow-sm">
+                    ⚠️ {pendingTaskCount} Eksik / Görev Bekliyor
+                  </span>
+                )}
+              </div>
               <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
                 <span className="flex items-center gap-1"><CalendarDays size={13} /> {formatDate(work.date, { day: "numeric", month: "short", year: "numeric" })}</span>
                 <span className="flex items-center gap-1"><PackageCheck size={13} /> {work.quantity.toLocaleString("tr-TR")} adet</span>
               </div>
             </div>
           </div>
-          <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold ${isHistory ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{isHistory ? "Tamamlandı" : "Devam ediyor"}</span>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 sm:justify-end">
+            <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold ${isHistory ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+              {isHistory ? "Tamamlandı" : "Devam ediyor"}
+            </span>
+            <div className="flex items-center gap-1.5">
+              {!isHistory && (
+                <button
+                  type="button"
+                  onClick={onEditWork}
+                  title="İşi düzenle"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-white px-2.5 text-xs font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/60 hover:text-brand-700"
+                >
+                  <Pencil size={13} />
+                  <span>Düzenle</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onDeleteWork}
+                title={isHistory ? "Geçmiş kaydı sil" : "Aktif işi sil"}
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-rose-100 bg-rose-50/50 px-2.5 text-xs font-semibold text-rose-600 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700"
+              >
+                <Trash2 size={13} />
+                <span>Sil</span>
+              </button>
+            </div>
+          </div>
         </div>
+
         {isHistory && work.completedAt && (
           <p className="mt-3 flex items-center gap-1.5 text-xs text-emerald-700"><Check size={14} /> {formatDate(work.completedAt)} tarihinde tamamlandı</p>
         )}
@@ -1099,6 +1495,147 @@ function WorkCard({ work, isHistory, onAddLog, onComplete }: { work: WorkOrder; 
           </button>
         )}
       </div>
+
+      {/* Eksik Malzeme / Görev (To-Do) Takip Sistemi */}
+      {(!isHistory || tasks.length > 0) && (
+        <div className="border-t border-line/80 bg-amber-50/25 px-4 py-4 sm:px-5">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <p className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
+              <ListTodo size={15} className="text-amber-600" />
+              Eksik Malzeme / Görev Takibi
+            </p>
+            <div className="flex items-center gap-1.5">
+              {pendingTaskCount > 0 ? (
+                <span className="rounded-md bg-amber-100/80 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                  {pendingTaskCount} bekliyor
+                </span>
+              ) : tasks.length > 0 ? (
+                <span className="rounded-md bg-emerald-100/80 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
+                  Tümü tamamlandı
+                </span>
+              ) : null}
+              <span className="rounded-md bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-400 shadow-sm">
+                {tasks.filter((t) => t.completed).length}/{tasks.length}
+              </span>
+            </div>
+          </div>
+
+          {!isHistory && (
+            <form onSubmit={handleAddTaskSubmit} className="mb-3 flex gap-2">
+              <input
+                type="text"
+                maxLength={160}
+                value={newTaskText}
+                onChange={(event) => setNewTaskText(event.target.value)}
+                placeholder="Örn: Biye götürülecek, çıtçıt verilecek, etiket eksik..."
+                className="h-9 min-w-0 flex-1 rounded-xl border border-line bg-white px-3 text-xs text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-brand-400 focus:ring-2 focus:ring-brand-100"
+              />
+              <button
+                type="submit"
+                disabled={!newTaskText.trim()}
+                className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl bg-brand-600 px-3.5 text-xs font-semibold text-white shadow-sm transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Plus size={14} strokeWidth={2.4} /> Ekle
+              </button>
+            </form>
+          )}
+
+          {tasks.length > 0 ? (
+            <ul className="space-y-2">
+              {tasks.map((task) => (
+                <li
+                  key={task.id}
+                  className={`flex items-center justify-between gap-2.5 rounded-xl border px-3 py-2.5 transition ${
+                    task.completed
+                      ? "border-line/60 bg-white/60 text-slate-400"
+                      : "border-amber-200/70 bg-white text-slate-700 shadow-sm"
+                  }`}
+                >
+                  {editingTaskId === task.id ? (
+                    <form
+                      onSubmit={(event) => saveEditedTask(event, task.id)}
+                      className="flex min-w-0 flex-1 flex-wrap items-center gap-2 sm:flex-nowrap"
+                    >
+                      <input
+                        autoFocus
+                        type="text"
+                        maxLength={160}
+                        value={editingTaskText}
+                        onChange={(event) => setEditingTaskText(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") cancelEditingTask();
+                        }}
+                        className="h-8 min-w-0 flex-1 rounded-lg border border-brand-300 bg-white px-2.5 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-brand-100"
+                      />
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="submit"
+                          className="rounded-lg bg-brand-600 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-brand-700"
+                        >
+                          Kaydet
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelEditingTask}
+                          className="rounded-lg border border-line bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:bg-slate-50"
+                        >
+                          Vazgeç
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <>
+                      <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5">
+                        <input
+                          type="checkbox"
+                          checked={task.completed}
+                          onChange={() => onToggleTask(task.id)}
+                          className="h-4 w-4 shrink-0 cursor-pointer rounded border-slate-300 accent-brand-600"
+                        />
+                        <span
+                          className={`break-words text-xs font-medium leading-5 ${
+                            task.completed ? "line-through text-slate-400" : "text-slate-700"
+                          }`}
+                        >
+                          {task.text}
+                        </span>
+                      </label>
+                      {!isHistory && (
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => startEditingTask(task)}
+                            title="Görevi düzenle"
+                            aria-label="Görevi düzenle"
+                            className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-brand-600"
+                          >
+                            <Pencil size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onDeleteTask(task.id)}
+                            title="Görevi sil"
+                            aria-label="Görevi sil"
+                            className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="flex items-center gap-2 rounded-xl border border-dashed border-slate-200 bg-white/70 px-3 py-2.5 text-xs text-slate-400">
+              <ListTodo size={14} /> Henüz eksik malzeme veya görev eklenmedi.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Teslimat Günlüğü (Notlar) */}
       <div className="border-t border-line/80 bg-slate-50/60 px-4 py-4 sm:px-5">
         <div className="mb-3 flex items-center justify-between">
           <p className="flex items-center gap-1.5 text-xs font-bold text-slate-600"><FileText size={14} className="text-slate-400" /> Teslimat günlüğü</p>
@@ -1111,8 +1648,61 @@ function WorkCard({ work, isHistory, onAddLog, onComplete }: { work: WorkOrder; 
                 {index !== sortedLogs.length - 1 && <span className="absolute left-[5px] top-3 h-full w-px bg-indigo-100" />}
                 <span className="relative mt-1 h-3 w-3 shrink-0 rounded-full border-[3px] border-white bg-brand-400 ring-1 ring-brand-100" />
                 <div className="min-w-0 flex-1 rounded-xl border border-line/70 bg-white px-3.5 py-3">
-                  <p className="text-sm leading-5 text-slate-700">{log.note}</p>
-                  <p className="mt-1.5 flex items-center gap-1 text-[11px] font-medium text-slate-400"><Clock3 size={12} /> {formatDate(log.date)}</p>
+                  {editingLogId === log.id ? (
+                    <form onSubmit={(event) => saveEditedLog(event, log.id)} className="space-y-2.5">
+                      <textarea
+                        autoFocus
+                        required
+                        maxLength={500}
+                        rows={2}
+                        value={editingLogNote}
+                        onChange={(event) => setEditingLogNote(event.target.value)}
+                        className="w-full rounded-xl border border-brand-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-brand-100"
+                      />
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <input
+                          required
+                          type="date"
+                          value={editingLogDate}
+                          onChange={(event) => setEditingLogDate(event.target.value)}
+                          className="h-8 rounded-lg border border-line bg-white px-2.5 text-xs text-slate-600 outline-none focus:border-brand-400"
+                        />
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={cancelEditingLog}
+                            className="h-8 rounded-lg border border-line bg-white px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                          >
+                            Vazgeç
+                          </button>
+                          <button
+                            type="submit"
+                            className="h-8 rounded-lg bg-brand-600 px-3 text-xs font-semibold text-white transition hover:bg-brand-700"
+                          >
+                            Kaydet
+                          </button>
+                        </div>
+                      </div>
+                    </form>
+                  ) : (
+                    <>
+                      <div className="flex items-start justify-between gap-2">
+                        <p className=" whitespace-pre-wrap break-words text-sm leading-5 text-slate-700">{log.note}</p>
+                        {!isHistory && (
+                          <button
+                            type="button"
+                            onClick={() => startEditingLog(log)}
+                            title="Notu düzenle"
+                            className="inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-slate-400 transition hover:bg-brand-50 hover:text-brand-700"
+                          >
+                            <Pencil size={12} />
+                            <span>Notu düzenle</span>
+                          </button>
+                        )}
+                      </div>
+                      <p className="mt-1.5 flex items-center gap-1 text-[11px] font-medium text-slate-400"><Clock3 size={12} /> {formatDate(log.date)}</p>
+                    </>
+                  )}
                 </div>
               </div>
             ))}
@@ -1299,6 +1889,132 @@ function WorkForm({ onSubmit, onCancel }: { onSubmit: (product: string, quantity
       </div>
       <FormActions onCancel={onCancel} submitLabel="İşi oluştur" />
     </form>
+  );
+}
+
+function EditWorkForm({
+  work,
+  currentMakerId,
+  makers,
+  onSubmit,
+  onCancel,
+}: {
+  work: WorkOrder;
+  currentMakerId: string;
+  makers: Maker[];
+  onSubmit: (product: string, quantity: number, date: string, targetMakerId: string) => void;
+  onCancel: () => void;
+}) {
+  const [product, setProduct] = useState(work.product);
+  const [quantity, setQuantity] = useState(String(work.quantity));
+  const [date, setDate] = useState(work.date);
+  const [makerId, setMakerId] = useState(currentMakerId);
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedQuantity = Number(quantity);
+    if (product.trim() && Number.isInteger(parsedQuantity) && parsedQuantity > 0 && makerId) {
+      onSubmit(product, parsedQuantity, date, makerId);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      <Field label="Ürün / model adı" required>
+        <input
+          autoFocus
+          required
+          maxLength={80}
+          value={product}
+          onChange={(event) => setProduct(event.target.value)}
+          placeholder="Örn. Pamuklu bebek tulumu"
+          className={inputClass}
+        />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Toplam adet" required>
+          <input
+            required
+            type="number"
+            min="1"
+            step="1"
+            value={quantity}
+            onChange={(event) => setQuantity(event.target.value)}
+            placeholder="500"
+            className={inputClass}
+          />
+        </Field>
+        <Field label="Veriliş tarihi" required>
+          <input
+            required
+            type="date"
+            value={date}
+            onChange={(event) => setDate(event.target.value)}
+            className={inputClass}
+          />
+        </Field>
+      </div>
+      <Field label="Fasoncu / Atölye" required>
+        <select
+          value={makerId}
+          onChange={(event) => setMakerId(event.target.value)}
+          className={inputClass}
+        >
+          {makers.map((maker) => (
+            <option key={maker.id} value={maker.id}>
+              {maker.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <FormActions onCancel={onCancel} submitLabel="Değişiklikleri kaydet" />
+    </form>
+  );
+}
+
+function ConfirmDeleteWorkModal({
+  work,
+  isHistory,
+  onConfirm,
+  onCancel,
+}: {
+  work: WorkOrder;
+  isHistory: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start gap-3 rounded-xl border border-rose-100 bg-rose-50/70 p-3.5 text-rose-800">
+        <AlertTriangle size={20} className="mt-0.5 shrink-0 text-rose-600" />
+        <div className="text-xs leading-5">
+          <p className="font-bold text-rose-900">
+            {isHistory
+              ? "Geçmiş kaydı kalıcı olarak silmek istiyor musunuz?"
+              : "Bu aktif işi silmek istediğinize emin misiniz?"}
+          </p>
+          <p className="mt-1 text-rose-700">
+            <strong>{work.product}</strong> ({work.quantity.toLocaleString("tr-TR")} adet) kaydı ve içindeki tüm teslimat notları kalıcı olarak kaldırılacaktır.
+          </p>
+        </div>
+      </div>
+      <div className="flex gap-2.5 pt-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="h-11 flex-1 rounded-xl border border-line text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+        >
+          Vazgeç
+        </button>
+        <button
+          type="button"
+          onClick={onConfirm}
+          className="h-11 flex-1 rounded-xl bg-rose-600 text-sm font-semibold text-white shadow-sm transition hover:bg-rose-700 active:scale-[0.99]"
+        >
+          Evet, Sil
+        </button>
+      </div>
+    </div>
   );
 }
 
