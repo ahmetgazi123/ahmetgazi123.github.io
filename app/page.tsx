@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
+  Banknote,
   Bell,
   CalendarDays,
   Check,
@@ -27,6 +28,7 @@ import {
   Shirt,
   Sparkles,
   Trash2,
+  Wallet,
   X,
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
@@ -45,6 +47,13 @@ type WorkTask = {
   completed: boolean;
 };
 
+type PaymentEntry = {
+  id: string;
+  amount: number;
+  date: string;
+  note?: string;
+};
+
 type WorkOrder = {
   id: string;
   product: string;
@@ -53,6 +62,8 @@ type WorkOrder = {
   completedAt?: string;
   logs: LogEntry[];
   tasks?: WorkTask[];
+  totalPrice?: number;
+  payments?: PaymentEntry[];
 };
 
 type Maker = {
@@ -75,7 +86,7 @@ type AppData = {
   printOrders: PrintOrder[];
 };
 
-type Modal = "maker" | "work" | "edit-work" | "delete-work" | "log" | "print" | null;
+type Modal = "maker" | "work" | "edit-work" | "delete-work" | "log" | "print" | "bulk-payment" | null;
 
 const STORAGE_KEY = "fason-takip-data-v1";
 const PRINT_STORAGE_KEY = "fatih-baski-data-v1";
@@ -97,6 +108,49 @@ function todayString() {
   return localDate.toISOString().slice(0, 10);
 }
 
+function roundCurrency(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function formatCurrency(amount: number) {
+  return `${new Intl.NumberFormat("tr-TR", {
+    minimumFractionDigits: amount % 1 === 0 ? 0 : 2,
+    maximumFractionDigits: 2,
+  }).format(amount)} ₺`;
+}
+
+function getWorkFinance(work: WorkOrder) {
+  const totalPrice = roundCurrency(work.totalPrice ?? 0);
+  const paidAmount = roundCurrency(
+    (work.payments ?? []).reduce((sum, payment) => sum + payment.amount, 0),
+  );
+  const remainingDebt = Math.max(0, roundCurrency(totalPrice - paidAmount));
+  const status: "none" | "unpaid" | "partial" | "paid" =
+    totalPrice <= 0 && paidAmount <= 0
+      ? "none"
+      : remainingDebt <= 0
+        ? "paid"
+        : paidAmount > 0
+          ? "partial"
+          : "unpaid";
+
+  return { totalPrice, paidAmount, remainingDebt, status };
+}
+
+function getMakerFinance(maker: Maker) {
+  return maker.works.reduce(
+    (acc, work) => {
+      const { totalPrice, paidAmount, remainingDebt } = getWorkFinance(work);
+      return {
+        totalPrice: roundCurrency(acc.totalPrice + totalPrice),
+        paidAmount: roundCurrency(acc.paidAmount + paidAmount),
+        remainingDebt: roundCurrency(acc.remainingDebt + remainingDebt),
+      };
+    },
+    { totalPrice: 0, paidAmount: 0, remainingDebt: 0 },
+  );
+}
+
 function isWorkTask(value: unknown): value is WorkTask {
   if (!value || typeof value !== "object") return false;
   const task = value as Partial<WorkTask>;
@@ -104,6 +158,19 @@ function isWorkTask(value: unknown): value is WorkTask {
     typeof task.id === "string" &&
     typeof task.text === "string" &&
     typeof task.completed === "boolean"
+  );
+}
+
+function isPaymentEntry(value: unknown): value is PaymentEntry {
+  if (!value || typeof value !== "object") return false;
+  const payment = value as Partial<PaymentEntry>;
+  return (
+    typeof payment.id === "string" &&
+    typeof payment.amount === "number" &&
+    Number.isFinite(payment.amount) &&
+    payment.amount > 0 &&
+    typeof payment.date === "string" &&
+    (payment.note === undefined || typeof payment.note === "string")
   );
 }
 
@@ -133,7 +200,13 @@ function isMaker(value: unknown): value is Maker {
             typeof log.note === "string" &&
             typeof log.date === "string",
         ) &&
-        (work.tasks === undefined || (Array.isArray(work.tasks) && work.tasks.every(isWorkTask))),
+        (work.tasks === undefined || (Array.isArray(work.tasks) && work.tasks.every(isWorkTask))) &&
+        (work.totalPrice === undefined ||
+          (typeof work.totalPrice === "number" &&
+            Number.isFinite(work.totalPrice) &&
+            work.totalPrice >= 0)) &&
+        (work.payments === undefined ||
+          (Array.isArray(work.payments) && work.payments.every(isPaymentEntry))),
     )
   );
 }
@@ -416,7 +489,9 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  const [bulkPaymentMakerId, setBulkPaymentMakerId] = useState<string | null>(null);
   const selectedMaker = makers.find((maker) => maker.id === selectedMakerId) ?? null;
+  const bulkPaymentMaker = makers.find((maker) => maker.id === bulkPaymentMakerId) ?? selectedMaker;
   const filteredMakers = useMemo(
     () => makers.filter((maker) => maker.name.toLocaleLowerCase("tr-TR").includes(searchTerm.toLocaleLowerCase("tr-TR"))),
     [makers, searchTerm],
@@ -431,6 +506,21 @@ export default function Home() {
     0,
   );
   const totalPrintUnits = printOrders.reduce((total, order) => total + order.quantity, 0);
+  const overallFinance = useMemo(
+    () =>
+      makers.reduce(
+        (acc, maker) => {
+          const finance = getMakerFinance(maker);
+          return {
+            totalPrice: roundCurrency(acc.totalPrice + finance.totalPrice),
+            paidAmount: roundCurrency(acc.paidAmount + finance.paidAmount),
+            remainingDebt: roundCurrency(acc.remainingDebt + finance.remainingDebt),
+          };
+        },
+        { totalPrice: 0, paidAmount: 0, remainingDebt: 0 },
+      ),
+    [makers],
+  );
 
   function openDashboard() {
     setSelectedMakerId(null);
@@ -469,7 +559,7 @@ export default function Home() {
     setToast(`${maker.name} fasoncu listenize eklendi.`);
   }
 
-  function addWork(product: string, quantity: number, date: string) {
+  function addWork(product: string, quantity: number, date: string, totalPrice?: number) {
     if (!selectedMaker) return;
     const work: WorkOrder = {
       id: makeId(),
@@ -478,6 +568,8 @@ export default function Home() {
       date,
       logs: [],
       tasks: [],
+      totalPrice: totalPrice !== undefined && totalPrice >= 0 ? roundCurrency(totalPrice) : undefined,
+      payments: [],
     };
     setMakers((current) =>
       current.map((maker) =>
@@ -488,7 +580,14 @@ export default function Home() {
     setToast("Yeni iş aktif işlere eklendi.");
   }
 
-  function updateWork(workId: string, product: string, quantity: number, date: string, targetMakerId: string) {
+  function updateWork(
+    workId: string,
+    product: string,
+    quantity: number,
+    date: string,
+    targetMakerId: string,
+    totalPrice?: number,
+  ) {
     if (!selectedMaker) return;
     const existingWork = selectedMaker.works.find((work) => work.id === workId);
     if (!existingWork) return;
@@ -498,6 +597,7 @@ export default function Home() {
       product: product.trim(),
       quantity,
       date,
+      totalPrice: totalPrice !== undefined && totalPrice >= 0 ? roundCurrency(totalPrice) : undefined,
     };
 
     if (targetMakerId === selectedMaker.id) {
@@ -511,7 +611,7 @@ export default function Home() {
             : maker,
         ),
       );
-      setToast("Aktif iş bilgileri güncellendi.");
+      setToast("İş bilgileri güncellendi.");
     } else {
       const targetMaker = makers.find((maker) => maker.id === targetMakerId);
       setMakers((current) =>
@@ -689,6 +789,114 @@ export default function Home() {
     setToast("Görev listeden kaldırıldı.");
   }
 
+  function addPayment(workId: string, amount: number, date: string, note?: string) {
+    if (!selectedMaker || !Number.isFinite(amount) || amount <= 0) return;
+    const payment: PaymentEntry = {
+      id: makeId(),
+      amount: roundCurrency(amount),
+      date,
+      note: note?.trim() || undefined,
+    };
+    setMakers((current) =>
+      current.map((maker) =>
+        maker.id === selectedMaker.id
+          ? {
+              ...maker,
+              works: maker.works.map((work) =>
+                work.id === workId
+                  ? { ...work, payments: [...(work.payments ?? []), payment] }
+                  : work,
+              ),
+            }
+          : maker,
+      ),
+    );
+    setToast(`${formatCurrency(payment.amount)} ödeme kaydedildi.`);
+  }
+
+  function deletePayment(workId: string, paymentId: string) {
+    if (!selectedMaker) return;
+    setMakers((current) =>
+      current.map((maker) =>
+        maker.id === selectedMaker.id
+          ? {
+              ...maker,
+              works: maker.works.map((work) =>
+                work.id === workId
+                  ? {
+                      ...work,
+                      payments: (work.payments ?? []).filter((payment) => payment.id !== paymentId),
+                    }
+                  : work,
+              ),
+            }
+          : maker,
+      ),
+    );
+    setToast("Ödeme kaydı silindi.");
+  }
+
+  function closeRemainingBalance(workId: string) {
+    if (!selectedMaker) return;
+    const target = selectedMaker.works.find((work) => work.id === workId);
+    if (!target) return;
+    const { remainingDebt } = getWorkFinance(target);
+    if (remainingDebt <= 0) return;
+    addPayment(workId, remainingDebt, todayString(), "Kalan bakiye kapatıldı");
+  }
+
+  function addBulkMakerPayment(makerId: string, amount: number, date: string, note?: string) {
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    const targetMaker = makers.find((maker) => maker.id === makerId);
+    if (!targetMaker) return;
+
+    let remainingToDistribute = roundCurrency(amount);
+    const unpaidWorkIdsSorted = [...targetMaker.works]
+      .filter((work) => getWorkFinance(work).remainingDebt > 0)
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((work) => work.id);
+
+    const allocations = new Map<string, number>();
+    for (const workId of unpaidWorkIdsSorted) {
+      if (remainingToDistribute <= 0) break;
+      const work = targetMaker.works.find((w) => w.id === workId);
+      if (!work) continue;
+      const { remainingDebt } = getWorkFinance(work);
+      const allocated = Math.min(remainingDebt, remainingToDistribute);
+      if (allocated > 0) {
+        allocations.set(workId, roundCurrency(allocated));
+        remainingToDistribute = roundCurrency(remainingToDistribute - allocated);
+      }
+    }
+
+    setMakers((current) =>
+      current.map((maker) => {
+        if (maker.id !== makerId) return maker;
+        return {
+          ...maker,
+          works: maker.works.map((work) => {
+            const allocated = allocations.get(work.id);
+            if (!allocated) return work;
+            const payment: PaymentEntry = {
+              id: makeId(),
+              amount: allocated,
+              date,
+              note: note?.trim() ? `${note.trim()} (Toplu ödeme)` : "Toplu ödeme",
+            };
+            return {
+              ...work,
+              payments: [...(work.payments ?? []), payment],
+            };
+          }),
+        };
+      }),
+    );
+
+    setModal(null);
+    setBulkPaymentMakerId(null);
+    setToast(`${targetMaker.name} için ${formatCurrency(amount - remainingToDistribute)} toplu ödeme işlere dağıtıldı.`);
+  }
+
   function completeWork(workId: string) {
     if (!selectedMaker) return;
     setMakers((current) =>
@@ -736,6 +944,7 @@ export default function Home() {
     ? selectedMaker.works.filter((work) => (activeTab === "active" ? !work.completedAt : Boolean(work.completedAt)))
     : [];
   const targetWork = selectedMaker?.works.find((work) => work.id === targetWorkId) ?? null;
+  const selectedMakerFinance = selectedMaker ? getMakerFinance(selectedMaker) : null;
 
   return (
     <main className="min-h-screen bg-canvas pb-24 md:pb-8">
@@ -851,14 +1060,39 @@ export default function Home() {
                       <p className="mt-1 text-sm text-slate-500">{selectedMaker.phone || "Fasoncu detayları ve iş geçmişi"}</p>
                     </div>
                   </div>
-                  <button onClick={() => setModal("work")} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 active:scale-[0.98]">
-                    <Plus size={18} strokeWidth={2.4} /> Yeni iş ekle
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    {selectedMakerFinance && selectedMakerFinance.remainingDebt > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBulkPaymentMakerId(selectedMaker.id);
+                          setModal("bulk-payment");
+                        }}
+                        className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 active:scale-[0.98]"
+                      >
+                        <Wallet size={17} /> Toplu ödeme yap
+                      </button>
+                    )}
+                    <button onClick={() => setModal("work")} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 active:scale-[0.98]">
+                      <Plus size={18} strokeWidth={2.4} /> Yeni iş ekle
+                    </button>
+                  </div>
                 </div>
-                <div className="mb-6 grid grid-cols-2 gap-3 sm:max-w-[440px]">
+
+                <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-5">
                   <MiniStat icon={<Scissors size={16} />} label="Aktif iş" value={String(selectedMaker.works.filter((work) => !work.completedAt).length)} tint="indigo" />
                   <MiniStat icon={<ClipboardList size={16} />} label="Geçmiş iş" value={String(selectedMaker.works.filter((work) => work.completedAt).length)} tint="emerald" />
+                  <MiniStat icon={<Banknote size={16} />} label="Toplam tutar" value={formatCurrency(selectedMakerFinance?.totalPrice ?? 0)} tint="indigo" />
+                  <MiniStat icon={<CheckCircle2 size={16} />} label="Toplam ödenen" value={formatCurrency(selectedMakerFinance?.paidAmount ?? 0)} tint="emerald" />
+                  <MiniStat
+                    icon={<Wallet size={16} />}
+                    label="Kalan borç"
+                    value={formatCurrency(selectedMakerFinance?.remainingDebt ?? 0)}
+                    tint={(selectedMakerFinance?.remainingDebt ?? 0) > 0 ? "rose" : "emerald"}
+                    className="col-span-2 lg:col-span-1"
+                  />
                 </div>
+
                 <div className="border-b border-line">
                   <div className="flex gap-7">
                     <button onClick={() => setActiveTab("active")} className={`relative pb-3 text-sm font-semibold transition ${activeTab === "active" ? "text-brand-700" : "text-slate-400 hover:text-slate-600"}`}>
@@ -896,6 +1130,9 @@ export default function Home() {
                           onToggleTask={(taskId) => toggleTask(work.id, taskId)}
                           onUpdateTask={(taskId, text) => updateTask(work.id, taskId, text)}
                           onDeleteTask={(taskId) => deleteTask(work.id, taskId)}
+                          onAddPayment={(amount, date, note) => addPayment(work.id, amount, date, note)}
+                          onDeletePayment={(paymentId) => deletePayment(work.id, paymentId)}
+                          onCloseRemainingBalance={() => closeRemainingBalance(work.id)}
                           onComplete={() => completeWork(work.id)}
                         />
                       ))}
@@ -917,18 +1154,118 @@ export default function Home() {
                   <div>
                     <div className="mb-2 inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.09em] text-brand-700"><Sparkles size={12} /> Hoş geldiniz</div>
                     <h1 className="text-[28px] font-bold tracking-tight text-ink sm:text-[34px]">İşleriniz, <span className="text-brand-600">düzenli.</span></h1>
-                    <p className="mt-2 text-sm text-slate-500 sm:text-[15px]">Fason işlerinizi ve teslimat notlarını tek yerden takip edin.</p>
+                    <p className="mt-2 text-sm text-slate-500 sm:text-[15px]">Fason işlerinizi, teslimat notlarınızı ve cari ödemelerinizi tek yerden takip edin.</p>
                   </div>
                   <button onClick={() => setModal("maker")} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 active:scale-[0.98]">
                     <Plus size={18} strokeWidth={2.4} /> Fasoncu ekle
                   </button>
                 </div>
 
-                <div className="mb-7 grid grid-cols-2 gap-3 lg:grid-cols-3">
+                <div className="mb-7 grid grid-cols-2 gap-3 lg:grid-cols-4">
                   <SummaryCard icon={<Factory size={17} />} label="Fasoncu" value={String(makers.length)} note="Kayıtlı atölye" tone="indigo" />
                   <SummaryCard icon={<Scissors size={17} />} label="Aktif iş" value={String(activeWorkCount)} note="Devam eden işler" tone="blue" />
-                  <SummaryCard icon={<PackageCheck size={17} />} label="Toplam adet" value={totalUnits.toLocaleString("tr-TR")} note="Aktif işlerde" tone="green" className="col-span-2 lg:col-span-1" />
+                  <SummaryCard icon={<PackageCheck size={17} />} label="Toplam adet" value={totalUnits.toLocaleString("tr-TR")} note="Aktif işlerde" tone="green" />
+                  <SummaryCard
+                    icon={<Wallet size={17} />}
+                    label="Toplam kalan borç"
+                    value={formatCurrency(overallFinance.remainingDebt)}
+                    note={`Ödenen: ${formatCurrency(overallFinance.paidAmount)}`}
+                    tone={overallFinance.remainingDebt > 0 ? "rose" : "green"}
+                  />
                 </div>
+
+                {/* Fasoncu Bazlı Kalan Borç Özeti (Cari Özet) */}
+                {makers.length > 0 && (
+                  <div className="mb-8 overflow-hidden rounded-2xl border border-line/80 bg-white shadow-card">
+                    <div className="flex flex-col gap-2 border-b border-line/80 bg-slate-50/70 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-50 text-brand-600">
+                          <Wallet size={16} />
+                        </span>
+                        <div>
+                          <h2 className="text-sm font-bold text-ink">Fasoncu Bazlı Kalan Borç Özeti (Cari)</h2>
+                          <p className="text-[11px] text-slate-400">Fasoncuların güncel bakiye durumu ve toplu ödeme yönetimi</p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="rounded-lg bg-white px-2.5 py-1 font-semibold text-slate-600 shadow-sm">
+                          Toplam: <strong>{formatCurrency(overallFinance.totalPrice)}</strong>
+                        </span>
+                        <span className="rounded-lg bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-700">
+                          Ödenen: <strong>{formatCurrency(overallFinance.paidAmount)}</strong>
+                        </span>
+                        <span className="rounded-lg bg-rose-50 px-2.5 py-1 font-bold text-rose-700">
+                          Kalan Borç: {formatCurrency(overallFinance.remainingDebt)}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="divide-y divide-line/70 px-4 sm:px-5">
+                      {makers.map((maker) => {
+                        const finance = getMakerFinance(maker);
+                        return (
+                          <div
+                            key={maker.id}
+                            className="flex flex-col gap-2.5 py-3 sm:flex-row sm:items-center sm:justify-between"
+                          >
+                            <div className="flex min-w-0 items-center gap-3">
+                              <span
+                                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br text-xs font-bold ${maker.color}`}
+                              >
+                                {getInitials(maker.name)}
+                              </span>
+                              <div className="min-w-0">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedMakerId(maker.id);
+                                    setActiveTab("active");
+                                  }}
+                                  className="truncate text-left text-sm font-bold text-ink transition hover:text-brand-600"
+                                >
+                                  {maker.name} —{" "}
+                                  <span className={finance.remainingDebt > 0 ? "text-rose-600" : "text-emerald-600"}>
+                                    Toplam Kalan Borç: {formatCurrency(finance.remainingDebt)}
+                                  </span>
+                                </button>
+                                <p className="text-[11px] text-slate-400">
+                                  Toplam İş Tutarı: {formatCurrency(finance.totalPrice)} · Ödenen: {formatCurrency(finance.paidAmount)}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-2">
+                              {finance.remainingDebt > 0 ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setBulkPaymentMakerId(maker.id);
+                                    setModal("bulk-payment");
+                                  }}
+                                  className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+                                >
+                                  <Banknote size={14} /> Ödeme Yap
+                                </button>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-700">
+                                  <Check size={12} /> Borç Yok
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedMakerId(maker.id);
+                                  setActiveTab("active");
+                                }}
+                                className="inline-flex h-8 items-center gap-1 rounded-lg border border-line bg-white px-2.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                              >
+                                Detay <ArrowRight size={12} />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
@@ -951,6 +1288,7 @@ export default function Home() {
                         (sum, work) => sum + (work.tasks ?? []).filter((task) => !task.completed).length,
                         0,
                       );
+                      const makerFinance = getMakerFinance(maker);
                       return (
                         <button
                           key={maker.id}
@@ -966,13 +1304,17 @@ export default function Home() {
                               <h3 className="truncate font-bold text-ink">{maker.name}</h3>
                               {index === 0 && <span className="rounded-md bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-emerald-700">Son eklenen</span>}
                             </div>
-                            <p className="mt-1 truncate text-xs text-slate-400">{maker.phone || "Fasoncu detaylarını görüntüle"}</p>
+                            <p className="mt-1 truncate text-xs text-slate-400">
+                              {makerFinance.remainingDebt > 0
+                                ? `Kalan Borç: ${formatCurrency(makerFinance.remainingDebt)}`
+                                : maker.phone || "Fasoncu detaylarını görüntüle"}
+                            </p>
                             <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs font-medium text-slate-500">
                               <span className={`h-1.5 w-1.5 rounded-full ${activeWorks.length > 0 ? "bg-emerald-500" : "bg-slate-300"}`} />
                               <span>{activeWorks.length} aktif iş</span>
                               {pendingTasksCount > 0 && (
                                 <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700 ring-1 ring-inset ring-amber-200/80">
-                                  ⚠️ {pendingTasksCount} eksik
+                                  ⚠️ {pendingTasksCount} görev
                                 </span>
                               )}
                               <span className="ml-auto flex items-center gap-1 text-brand-600 opacity-0 transition group-hover:opacity-100">Detay <ArrowRight size={13} /></span>
@@ -1058,13 +1400,16 @@ export default function Home() {
                     ? targetWork?.completedAt
                       ? "Geçmiş işi sil"
                       : "Aktif işi sil"
-                    : modal === "log"
-                      ? "Teslimat notu ekle"
-                      : "Baskı kaydı ekle"
+                    : modal === "bulk-payment"
+                      ? `${bulkPaymentMaker?.name ?? "Fasoncu"} — Toplu Ödeme`
+                      : modal === "log"
+                        ? "Teslimat notu ekle"
+                        : "Baskı kaydı ekle"
           }
           onClose={() => {
             setModal(null);
             setTargetWorkId(null);
+            setBulkPaymentMakerId(null);
           }}
         >
           {modal === "maker" && <MakerForm onSubmit={addMaker} onCancel={() => setModal(null)} />}
@@ -1074,8 +1419,8 @@ export default function Home() {
               work={targetWork}
               currentMakerId={selectedMaker.id}
               makers={makers}
-              onSubmit={(product, quantity, date, targetMakerId) =>
-                updateWork(targetWork.id, product, quantity, date, targetMakerId)
+              onSubmit={(product, quantity, date, targetMakerId, totalPrice) =>
+                updateWork(targetWork.id, product, quantity, date, targetMakerId, totalPrice)
               }
               onCancel={() => {
                 setModal(null);
@@ -1091,6 +1436,16 @@ export default function Home() {
               onCancel={() => {
                 setModal(null);
                 setTargetWorkId(null);
+              }}
+            />
+          )}
+          {modal === "bulk-payment" && bulkPaymentMaker && (
+            <BulkPaymentForm
+              maker={bulkPaymentMaker}
+              onSubmit={(amount, date, note) => addBulkMakerPayment(bulkPaymentMaker.id, amount, date, note)}
+              onCancel={() => {
+                setModal(null);
+                setBulkPaymentMakerId(null);
               }}
             />
           )}
@@ -1323,11 +1678,26 @@ function Brand({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function SummaryCard({ icon, label, value, note, tone, className = "" }: { icon: React.ReactNode; label: string; value: string; note: string; tone: "indigo" | "blue" | "green"; className?: string }) {
+function SummaryCard({
+  icon,
+  label,
+  value,
+  note,
+  tone,
+  className = "",
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  note: string;
+  tone: "indigo" | "blue" | "green" | "rose";
+  className?: string;
+}) {
   const styles = {
     indigo: "bg-indigo-50 text-indigo-600",
     blue: "bg-sky-50 text-sky-600",
     green: "bg-emerald-50 text-emerald-600",
+    rose: "bg-rose-50 text-rose-600",
   }[tone];
   return (
     <div className={`rounded-2xl border border-line/80 bg-white p-4 shadow-card sm:p-5 ${className}`}>
@@ -1336,7 +1706,7 @@ function SummaryCard({ icon, label, value, note, tone, className = "" }: { icon:
         <MoreHorizontal size={18} className="text-slate-300" />
       </div>
       <div className="mt-3 flex items-baseline gap-2">
-        <p className="text-2xl font-bold tracking-tight text-ink">{value}</p>
+        <p className="text-xl font-bold tracking-tight text-ink sm:text-2xl">{value}</p>
         <p className="text-xs font-medium text-slate-500">{label}</p>
       </div>
       <p className="mt-1 text-[11px] text-slate-400">{note}</p>
@@ -1344,11 +1714,31 @@ function SummaryCard({ icon, label, value, note, tone, className = "" }: { icon:
   );
 }
 
-function MiniStat({ icon, label, value, tint }: { icon: React.ReactNode; label: string; value: string; tint: "indigo" | "emerald" }) {
+function MiniStat({
+  icon,
+  label,
+  value,
+  tint,
+  className = "",
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  tint: "indigo" | "emerald" | "rose";
+  className?: string;
+}) {
+  const tintStyles = {
+    indigo: "bg-indigo-50 text-brand-600",
+    emerald: "bg-emerald-50 text-emerald-600",
+    rose: "bg-rose-50 text-rose-600",
+  }[tint];
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-line/80 bg-white px-3.5 py-3 shadow-card">
-      <span className={`flex h-8 w-8 items-center justify-center rounded-lg ${tint === "indigo" ? "bg-indigo-50 text-brand-600" : "bg-emerald-50 text-emerald-600"}`}>{icon}</span>
-      <div><p className="text-[11px] text-slate-400">{label}</p><p className="mt-0.5 text-sm font-bold text-ink">{value}</p></div>
+    <div className={`flex items-center gap-3 rounded-xl border border-line/80 bg-white px-3.5 py-3 shadow-card ${className}`}>
+      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${tintStyles}`}>{icon}</span>
+      <div className="min-w-0">
+        <p className="truncate text-[11px] text-slate-400">{label}</p>
+        <p className="mt-0.5 truncate text-sm font-bold text-ink">{value}</p>
+      </div>
     </div>
   );
 }
@@ -1364,6 +1754,9 @@ function WorkCard({
   onToggleTask,
   onUpdateTask,
   onDeleteTask,
+  onAddPayment,
+  onDeletePayment,
+  onCloseRemainingBalance,
   onComplete,
 }: {
   work: WorkOrder;
@@ -1376,11 +1769,16 @@ function WorkCard({
   onToggleTask: (taskId: string) => void;
   onUpdateTask: (taskId: string, text: string) => void;
   onDeleteTask: (taskId: string) => void;
+  onAddPayment: (amount: number, date: string, note?: string) => void;
+  onDeletePayment: (paymentId: string) => void;
+  onCloseRemainingBalance: () => void;
   onComplete: () => void;
 }) {
   const sortedLogs = [...work.logs].sort((a, b) => a.date.localeCompare(b.date));
   const tasks = work.tasks ?? [];
   const pendingTaskCount = tasks.filter((task) => !task.completed).length;
+  const payments = [...(work.payments ?? [])].sort((a, b) => b.date.localeCompare(a.date));
+  const { totalPrice, paidAmount, remainingDebt, status: paymentStatus } = getWorkFinance(work);
 
   const [editingLogId, setEditingLogId] = useState<string | null>(null);
   const [editingLogNote, setEditingLogNote] = useState("");
@@ -1389,6 +1787,10 @@ function WorkCard({
   const [newTaskText, setNewTaskText] = useState("");
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [editingTaskText, setEditingTaskText] = useState("");
+
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [paymentDate, setPaymentDate] = useState(todayString());
+  const [paymentNote, setPaymentNote] = useState("");
 
   function startEditingLog(log: LogEntry) {
     setEditingLogId(log.id);
@@ -1433,6 +1835,15 @@ function WorkCard({
     cancelEditingTask();
   }
 
+  function handleAddPaymentSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedAmount = Number(paymentAmount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) return;
+    onAddPayment(parsedAmount, paymentDate, paymentNote);
+    setPaymentAmount("");
+    setPaymentNote("");
+  }
+
   return (
     <article className="overflow-hidden rounded-2xl border border-line/80 bg-white shadow-card">
       <div className="p-4 sm:p-5">
@@ -1446,13 +1857,33 @@ function WorkCard({
                 <h3 className="truncate font-bold text-ink">{work.product}</h3>
                 {!isHistory && pendingTaskCount > 0 && (
                   <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/80 bg-amber-50 px-2.5 py-0.5 text-[11px] font-bold text-amber-800 shadow-sm">
-                    ⚠️ {pendingTaskCount} Eksik / Görev Bekliyor
+                    ⚠️ {pendingTaskCount} Görev Bekliyor
+                  </span>
+                )}
+                {paymentStatus === "unpaid" && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[11px] font-bold text-rose-700">
+                    Ödeme Bekliyor
+                  </span>
+                )}
+                {paymentStatus === "partial" && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-[11px] font-bold text-amber-800">
+                    Kısmi Ödendi
+                  </span>
+                )}
+                {paymentStatus === "paid" && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-bold text-emerald-700">
+                    <Check size={11} /> Ödendi
                   </span>
                 )}
               </div>
               <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
                 <span className="flex items-center gap-1"><CalendarDays size={13} /> {formatDate(work.date, { day: "numeric", month: "short", year: "numeric" })}</span>
                 <span className="flex items-center gap-1"><PackageCheck size={13} /> {work.quantity.toLocaleString("tr-TR")} adet</span>
+                {totalPrice > 0 && (
+                  <span className="flex items-center gap-1 font-semibold text-slate-600">
+                    <Banknote size={13} className="text-brand-600" /> {formatCurrency(totalPrice)}
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -1462,17 +1893,15 @@ function WorkCard({
               {isHistory ? "Tamamlandı" : "Devam ediyor"}
             </span>
             <div className="flex items-center gap-1.5">
-              {!isHistory && (
-                <button
-                  type="button"
-                  onClick={onEditWork}
-                  title="İşi düzenle"
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-white px-2.5 text-xs font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/60 hover:text-brand-700"
-                >
-                  <Pencil size={13} />
-                  <span>Düzenle</span>
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={onEditWork}
+                title="İşi düzenle"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-white px-2.5 text-xs font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/60 hover:text-brand-700"
+              >
+                <Pencil size={13} />
+                <span>Düzenle</span>
+              </button>
               <button
                 type="button"
                 onClick={onDeleteWork}
@@ -1493,6 +1922,110 @@ function WorkCard({
           <button onClick={onAddLog} className="mt-4 flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-brand-100 bg-brand-50/70 px-3 text-xs font-semibold text-brand-700 transition hover:bg-brand-50 sm:w-auto sm:px-4">
             <CirclePlus size={16} /> Not ekle / teslimat kaydı gir
           </button>
+        )}
+      </div>
+
+      {/* Fason Ücret ve Ödeme Takip Sistemi (Finans) */}
+      <div className="border-t border-line/80 bg-emerald-50/20 px-4 py-4 sm:px-5">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <p className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
+            <Wallet size={15} className="text-emerald-600" />
+            Ücret ve Ödeme Takibi (Finans)
+          </p>
+          <div className="flex items-center gap-2">
+            {remainingDebt > 0 && (
+              <button
+                type="button"
+                onClick={onCloseRemainingBalance}
+                className="inline-flex h-7 items-center gap-1 rounded-lg bg-emerald-600 px-2.5 text-[11px] font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+              >
+                <Check size={12} /> Kalan Bakiyeyi Kapat ({formatCurrency(remainingDebt)})
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="mb-3 grid grid-cols-3 gap-2.5">
+          <div className="rounded-xl border border-line/80 bg-white px-3 py-2.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Toplam Tutar</p>
+            <p className="mt-0.5 text-sm font-bold text-ink">{formatCurrency(totalPrice)}</p>
+          </div>
+          <div className="rounded-xl border border-emerald-100 bg-white px-3 py-2.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-600">Ödenen</p>
+            <p className="mt-0.5 text-sm font-bold text-emerald-700">{formatCurrency(paidAmount)}</p>
+          </div>
+          <div className={`rounded-xl border px-3 py-2.5 ${remainingDebt > 0 ? "border-rose-200 bg-rose-50/40" : "border-emerald-100 bg-white"}`}>
+            <p className={`text-[10px] font-semibold uppercase tracking-wide ${remainingDebt > 0 ? "text-rose-600" : "text-slate-400"}`}>Kalan Borç</p>
+            <p className={`mt-0.5 text-sm font-bold ${remainingDebt > 0 ? "text-rose-700" : "text-emerald-700"}`}>
+              {formatCurrency(remainingDebt)}
+            </p>
+          </div>
+        </div>
+
+        <form onSubmit={handleAddPaymentSubmit} className="mb-3 flex flex-col gap-2 sm:flex-row">
+          <input
+            type="number"
+            min="0.01"
+            step="0.01"
+            value={paymentAmount}
+            onChange={(event) => setPaymentAmount(event.target.value)}
+            placeholder="Ödeme tutarı (₺)"
+            className="h-9 rounded-xl border border-line bg-white px-3 text-xs text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-brand-400 focus:ring-2 focus:ring-brand-100 sm:w-36"
+          />
+          <input
+            type="text"
+            maxLength={100}
+            value={paymentNote}
+            onChange={(event) => setPaymentNote(event.target.value)}
+            placeholder="Not (İsteğe bağlı: Nakit, EFT vb.)"
+            className="h-9 min-w-0 flex-1 rounded-xl border border-line bg-white px-3 text-xs text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-brand-400 focus:ring-2 focus:ring-brand-100"
+          />
+          <input
+            type="date"
+            required
+            value={paymentDate}
+            onChange={(event) => setPaymentDate(event.target.value)}
+            className="h-9 rounded-xl border border-line bg-white px-2.5 text-xs text-slate-600 outline-none focus:border-brand-400 sm:w-36"
+          />
+          <button
+            type="submit"
+            disabled={!paymentAmount || Number(paymentAmount) <= 0}
+            className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-xl bg-brand-600 px-3.5 text-xs font-semibold text-white shadow-sm transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Plus size={14} strokeWidth={2.4} /> Ödeme Ekle
+          </button>
+        </form>
+
+        {payments.length > 0 ? (
+          <div className="space-y-1.5">
+            {payments.map((payment) => (
+              <div
+                key={payment.id}
+                className="flex items-center justify-between gap-2 rounded-xl border border-line/70 bg-white px-3 py-2 text-xs"
+              >
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="font-bold text-emerald-700">+{formatCurrency(payment.amount)}</span>
+                  {payment.note && <span className="truncate text-slate-600">· {payment.note}</span>}
+                  <span className="text-[11px] text-slate-400">({formatDate(payment.date, { day: "numeric", month: "short", year: "numeric" })})</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onDeletePayment(payment.id)}
+                  title="Ödemeyi sil"
+                  aria-label="Ödemeyi sil"
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-[11px] text-slate-400">
+            {totalPrice > 0
+              ? "Bu iş için henüz ödeme girişi yapılmadı."
+              : "İş tutarı belirlemek için üstteki “Düzenle” butonunu kullanabilir veya doğrudan ödeme ekleyebilirsiniz."}
+          </p>
         )}
       </div>
 
@@ -1865,14 +2398,29 @@ function MakerForm({ onSubmit, onCancel }: { onSubmit: (name: string, phone: str
   );
 }
 
-function WorkForm({ onSubmit, onCancel }: { onSubmit: (product: string, quantity: number, date: string) => void; onCancel: () => void }) {
+function WorkForm({
+  onSubmit,
+  onCancel,
+}: {
+  onSubmit: (product: string, quantity: number, date: string, totalPrice?: number) => void;
+  onCancel: () => void;
+}) {
   const [product, setProduct] = useState("");
   const [quantity, setQuantity] = useState("");
+  const [totalPrice, setTotalPrice] = useState("");
   const [date, setDate] = useState(todayString());
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const parsedQuantity = Number(quantity);
-    if (product.trim() && Number.isInteger(parsedQuantity) && parsedQuantity > 0) onSubmit(product, parsedQuantity, date);
+    const parsedTotalPrice = totalPrice.trim() ? Number(totalPrice) : undefined;
+    if (
+      product.trim() &&
+      Number.isInteger(parsedQuantity) &&
+      parsedQuantity > 0 &&
+      (parsedTotalPrice === undefined || (Number.isFinite(parsedTotalPrice) && parsedTotalPrice >= 0))
+    ) {
+      onSubmit(product, parsedQuantity, date, parsedTotalPrice);
+    }
   }
   return (
     <form onSubmit={submit} className="space-y-4">
@@ -1883,10 +2431,21 @@ function WorkForm({ onSubmit, onCancel }: { onSubmit: (product: string, quantity
         <Field label="Verilen adet" required>
           <input required type="number" min="1" step="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} placeholder="500" className={inputClass} />
         </Field>
-        <Field label="Veriliş tarihi" required>
-          <input required type="date" value={date} onChange={(event) => setDate(event.target.value)} className={inputClass} />
+        <Field label="Toplam Tutar (₺)" hint="İsteğe bağlı">
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={totalPrice}
+            onChange={(event) => setTotalPrice(event.target.value)}
+            placeholder="Örn. 25000"
+            className={inputClass}
+          />
         </Field>
       </div>
+      <Field label="Veriliş tarihi" required>
+        <input required type="date" value={date} onChange={(event) => setDate(event.target.value)} className={inputClass} />
+      </Field>
       <FormActions onCancel={onCancel} submitLabel="İşi oluştur" />
     </form>
   );
@@ -1902,19 +2461,27 @@ function EditWorkForm({
   work: WorkOrder;
   currentMakerId: string;
   makers: Maker[];
-  onSubmit: (product: string, quantity: number, date: string, targetMakerId: string) => void;
+  onSubmit: (product: string, quantity: number, date: string, targetMakerId: string, totalPrice?: number) => void;
   onCancel: () => void;
 }) {
   const [product, setProduct] = useState(work.product);
   const [quantity, setQuantity] = useState(String(work.quantity));
+  const [totalPrice, setTotalPrice] = useState(work.totalPrice !== undefined ? String(work.totalPrice) : "");
   const [date, setDate] = useState(work.date);
   const [makerId, setMakerId] = useState(currentMakerId);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const parsedQuantity = Number(quantity);
-    if (product.trim() && Number.isInteger(parsedQuantity) && parsedQuantity > 0 && makerId) {
-      onSubmit(product, parsedQuantity, date, makerId);
+    const parsedTotalPrice = totalPrice.trim() ? Number(totalPrice) : undefined;
+    if (
+      product.trim() &&
+      Number.isInteger(parsedQuantity) &&
+      parsedQuantity > 0 &&
+      makerId &&
+      (parsedTotalPrice === undefined || (Number.isFinite(parsedTotalPrice) && parsedTotalPrice >= 0))
+    ) {
+      onSubmit(product, parsedQuantity, date, makerId, parsedTotalPrice);
     }
   }
 
@@ -1944,6 +2511,19 @@ function EditWorkForm({
             className={inputClass}
           />
         </Field>
+        <Field label="Toplam Tutar (₺)" hint="İsteğe bağlı">
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={totalPrice}
+            onChange={(event) => setTotalPrice(event.target.value)}
+            placeholder="Örn. 25000"
+            className={inputClass}
+          />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
         <Field label="Veriliş tarihi" required>
           <input
             required
@@ -1953,21 +2533,91 @@ function EditWorkForm({
             className={inputClass}
           />
         </Field>
+        <Field label="Fasoncu / Atölye" required>
+          <select
+            value={makerId}
+            onChange={(event) => setMakerId(event.target.value)}
+            className={inputClass}
+          >
+            {makers.map((maker) => (
+              <option key={maker.id} value={maker.id}>
+                {maker.name}
+              </option>
+            ))}
+          </select>
+        </Field>
       </div>
-      <Field label="Fasoncu / Atölye" required>
-        <select
-          value={makerId}
-          onChange={(event) => setMakerId(event.target.value)}
-          className={inputClass}
-        >
-          {makers.map((maker) => (
-            <option key={maker.id} value={maker.id}>
-              {maker.name}
-            </option>
-          ))}
-        </select>
-      </Field>
       <FormActions onCancel={onCancel} submitLabel="Değişiklikleri kaydet" />
+    </form>
+  );
+}
+
+function BulkPaymentForm({
+  maker,
+  onSubmit,
+  onCancel,
+}: {
+  maker: Maker;
+  onSubmit: (amount: number, date: string, note?: string) => void;
+  onCancel: () => void;
+}) {
+  const finance = getMakerFinance(maker);
+  const [amount, setAmount] = useState(finance.remainingDebt > 0 ? String(finance.remainingDebt) : "");
+  const [date, setDate] = useState(todayString());
+  const [note, setNote] = useState("");
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedAmount = Number(amount);
+    if (Number.isFinite(parsedAmount) && parsedAmount > 0 && parsedAmount <= finance.remainingDebt) {
+      onSubmit(parsedAmount, date, note);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 px-3.5 py-3 text-xs leading-5 text-emerald-900">
+        <p className="font-bold">{maker.name} — Cari Özet</p>
+        <p className="mt-0.5 text-emerald-800">
+          Toplam Kalan Borç: <strong>{formatCurrency(finance.remainingDebt)}</strong>. Girilen toplu ödeme, en eski tarihli borçlu işten başlayarak otomatik düşülür.
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Ödeme tutarı (₺)" required>
+          <input
+            autoFocus
+            required
+            type="number"
+            min="0.01"
+            max={finance.remainingDebt}
+            step="0.01"
+            value={amount}
+            onChange={(event) => setAmount(event.target.value)}
+            placeholder="Örn. 15000"
+            className={inputClass}
+          />
+        </Field>
+        <Field label="Ödeme tarihi" required>
+          <input
+            required
+            type="date"
+            value={date}
+            onChange={(event) => setDate(event.target.value)}
+            className={inputClass}
+          />
+        </Field>
+      </div>
+      <Field label="Açıklama / Not" hint="İsteğe bağlı">
+        <input
+          type="text"
+          maxLength={100}
+          value={note}
+          onChange={(event) => setNote(event.target.value)}
+          placeholder="Örn. Havale / Nakit toplu ödeme"
+          className={inputClass}
+        />
+      </Field>
+      <FormActions onCancel={onCancel} submitLabel="Toplu ödemeyi kaydet" />
     </form>
   );
 }
