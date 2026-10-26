@@ -48,6 +48,15 @@ $$;
 --       "name": "...",
 --       "phone": "...",
 --       "color": "...",
+--       "transactions": [
+--         {
+--           "id": "...",
+--           "type": "debt",
+--           "amount": 25000,
+--           "date": "YYYY-MM-DD",
+--           "note": "500 adet bebek tulumu dikim ücreti"
+--         }
+--       ],
 --       "works": [
 --         {
 --           "id": "...",
@@ -55,10 +64,8 @@ $$;
 --           "quantity": 500,
 --           "date": "YYYY-MM-DD",
 --           "completedAt": "YYYY-MM-DD",
---           "totalPrice": 25000,
 --           "logs": [{ "id": "...", "note": "...", "date": "YYYY-MM-DD" }],
---           "tasks": [{ "id": "...", "text": "...", "completed": false }],
---           "payments": [{ "id": "...", "amount": 10000, "date": "YYYY-MM-DD", "note": "..." }]
+--           "tasks": [{ "id": "...", "text": "...", "completed": false }]
 --         }
 --       ]
 --     }
